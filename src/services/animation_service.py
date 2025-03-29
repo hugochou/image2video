@@ -24,16 +24,42 @@ class AnimationService:
             "缓入": lambda t: t**2,  # 缓入（慢开始，快结束）
             "缓出": lambda t: 1 - (1 - t)**2,  # 缓出（快开始，慢结束）
             "缓入缓出": lambda t: 3*(t**2) - 2*(t**3),  # 缓入缓出
-            "回弹": lambda t: 1 + (1.7 * t - 1.7) * np.exp(-10 * t),  # 弹性回弹
-            "急速": lambda t: t**3,  # 更强烈的缓入
+            "强缓入": lambda t: t**3,  # 更强烈的缓入
             "强缓出": lambda t: 1 - (1 - t)**3,  # 更强烈的缓出
-            "弹入": lambda t: 1 - np.cos(t * np.pi / 2),  # 弹性进入
-            "弹出": lambda t: np.sin(t * np.pi / 2),  # 弹性退出
-            "跳跃": lambda t: 1 + (np.sin(t * 2 * np.pi) * np.exp(-4 * t) * 0.3),  # 跳跃效果
+            "平滑弹入": lambda t: 1 - np.cos(t * np.pi / 2),  # 平滑弹性进入
+            "平滑弹出": lambda t: np.sin(t * np.pi / 2),  # 平滑弹性退出
             "随机": None  # 随机曲线标记，实际函数会在运行时确定
         }
 
-        # 定义预设动画效果（不包含曲线相关描述，纯动画效果）
+        # 缩放预设选项
+        self.scale_presets = {
+            "无": [1.0, 1.0],
+            "放大": [1.0, 1.2],
+            "缩小": [1.2, 1.0],
+            "轻微放大": [1.0, 1.1],
+            "轻微缩小": [1.1, 1.0],
+            "剧烈放大": [1.0, 1.25],
+            "脉动": [1.0, 1.05],
+            "随机": None  # 随机标记，实际值会在运行时确定
+        }
+        
+        # 平移预设选项
+        self.position_presets = {
+            "无": [(0, 0), (0, 0)],
+            "左到右": [(-0.02, 0), (0.02, 0)],
+            "右到左": [(0.02, 0), (-0.02, 0)],
+            "上到下": [(0, -0.02), (0, 0.02)],
+            "下到上": [(0, 0.02), (0, -0.02)],
+            "左上到右下": [(-0.015, -0.015), (0.015, 0.015)],
+            "右上到左下": [(0.015, -0.015), (-0.015, 0.015)],
+            "左下到右上": [(-0.015, 0.015), (0.015, -0.015)],
+            "右下到左上": [(0.015, 0.015), (-0.015, -0.015)],
+            "轻微左右": [(-0.01, 0), (0.01, 0)],
+            "轻微上下": [(0, -0.01), (0, 0.01)],
+            "随机": None  # 随机标记，实际值会在运行时确定
+        }
+
+        # 定义预设动画效果（兼容原有代码）
         self.preset_animations = {
             "静止": {
                 "scale": [1.0, 1.0],
@@ -131,7 +157,7 @@ class AnimationService:
                 "curve": "线性"
             }
         }
-
+        
     def get_curve_function(self, curve_name: str) -> Callable[[float], float]:
         """
         获取指定名称的曲线函数
@@ -163,34 +189,71 @@ class AnimationService:
             动画设置字典
         """
         if isinstance(animation, str):
-            if animation == "随机":
-                return self.get_random_animation()
-            else:
-                return self.preset_animations.get(animation, self.preset_animations["静止"])
+            return self.preset_animations.get(animation, self.preset_animations["静止"])
         return animation
 
-    def get_random_animation(self) -> Dict:
+    def get_random_scale(self) -> List:
+        """获取随机缩放设置"""
+        scale_options = list(self.scale_presets.keys())
+        scale_options.remove("无")
+        if "随机" in scale_options:
+            scale_options.remove("随机")
+        
+        random_scale_name = random.choice(scale_options)
+        random_scale = self.scale_presets[random_scale_name]
+        print(f"随机选择缩放效果: '{random_scale_name}' -> 值={random_scale}")
+        return random_scale
+    
+    def get_random_position(self) -> List:
+        """获取随机位移设置"""
+        position_options = list(self.position_presets.keys())
+        position_options.remove("无")
+        if "随机" in position_options:
+            position_options.remove("随机")
+        
+        random_position_name = random.choice(position_options)
+        random_position = self.position_presets[random_position_name]
+        print(f"随机选择位移效果: '{random_position_name}' -> 值={random_position}")
+        return random_position
+    
+    def combine_animation_settings(self, scale_preset: str, position_preset: str, curve: str) -> Dict:
         """
-        获取随机动画设置
+        组合缩放和位移预设，创建完整的动画设置
+        
+        Args:
+            scale_preset: 缩放预设名称
+            position_preset: 位移预设名称
+            curve: 曲线名称
         
         Returns:
-            随机选择的动画设置
+            组合后的动画设置字典
         """
-        # 随机选择一个预设动画（排除"静止"）
-        preset_names = list(self.preset_animations.keys())
-        if "静止" in preset_names:
-            preset_names.remove("静止")
+        print(f"\n===== 动画参数 =====")
+        print(f"缩放预设: '{scale_preset}'")
+        print(f"平移预设: '{position_preset}'")
+        print(f"曲线函数: '{curve}'")
         
-        random_preset = random.choice(preset_names)
-        random_animation = self.preset_animations[random_preset].copy()
+        # 处理缩放预设
+        if scale_preset == "随机":
+            scale = self.get_random_scale()
+        else:
+            scale = self.scale_presets.get(scale_preset, self.scale_presets["无"])
         
-        # 随机选择一个曲线
-        curve_options = list(self.curve_functions.keys())
-        if None in curve_options:
-            curve_options.remove(None)
-        random_curve = random.choice(curve_options)
+        # 处理位移预设
+        if position_preset == "随机":
+            position = self.get_random_position()
+        else:
+            position = self.position_presets.get(position_preset, self.position_presets["无"])
         
-        random_animation['curve'] = random_curve
-        print(f"随机选择动画: '{random_preset}' 搭配曲线: '{random_curve}'")
+        # 创建组合设置
+        animation_settings = {
+            "scale": scale,
+            "position": position,
+            "curve": curve
+        }
         
-        return random_animation 
+        print(f"缩放参数: 起始={scale[0]:.2f}, 结束={scale[1]:.2f}")
+        print(f"平移参数: 起始=({position[0][0]:.3f}, {position[0][1]:.3f}), 结束=({position[1][0]:.3f}, {position[1][1]:.3f})")
+        print(f"====== 结束 ======\n")
+        
+        return animation_settings 

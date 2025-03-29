@@ -28,14 +28,38 @@ class TransitionService:
             "百叶窗": lambda clip1, clip2, duration: self._blinds_effect(clip1, clip2, duration),
             "扭曲溶解": lambda clip1, clip2, duration: self._warp_dissolve(clip1, clip2, duration),
             "闪白过渡": lambda clip1, clip2, duration: self._flash_transition(clip1, clip2, duration),
-            "随机": "random"  # 特殊标记，表示随机选择一个效果
+            "随机": None  # 随机转场标记，实际函数会在运行时确定
         }
+    
+    def get_transition_function(self, transition_name: str):
+        """
+        获取指定名称的转场函数
+        
+        Args:
+            transition_name: 转场效果名称
+            
+        Returns:
+            转场函数
+        """
+        if transition_name == "随机":
+            # 当指定随机转场时，随机选择一个转场效果（除了"无"和"随机"本身）
+            transition_options = list(self.transitions.keys())
+            if "无" in transition_options:
+                transition_options.remove("无")
+            if "随机" in transition_options:
+                transition_options.remove("随机")
+            
+            selected_transition = random.choice(transition_options)
+            print(f"随机选择转场效果: '{selected_transition}'")
+            return self.transitions[selected_transition]
+            
+        return self.transitions.get(transition_name, self._no_transition)
     
     def apply_transitions_to_clips(
         self, 
         clips: List[VideoClip], 
-        transition: str = "淡入淡出", 
-        transition_duration: float = 0.7,
+        transition_name: str, 
+        transition_duration: float,
         use_custom_transitions: bool = False,
         custom_transitions: List[str] = None
     ) -> List[VideoClip]:
@@ -44,7 +68,7 @@ class TransitionService:
         
         Args:
             clips: 视频片段列表
-            transition: 全局转场效果
+            transition_name: 转场效果名称
             transition_duration: 转场持续时间
             use_custom_transitions: 是否使用自定义转场
             custom_transitions: 自定义转场效果列表
@@ -65,7 +89,7 @@ class TransitionService:
             if len(custom_transitions) < len(clips) - 1:
                 # 不够的部分用默认转场补充
                 missing = len(clips) - 1 - len(custom_transitions)
-                custom_transitions.extend([transition] * missing)
+                custom_transitions.extend([transition_name] * missing)
                 print(f"  自定义转场数量不足，添加 {missing} 个默认转场")
             
             # 依次处理每个转场点
@@ -81,11 +105,7 @@ class TransitionService:
                     # 获取转场函数
                     if trans_name == "随机":
                         # 随机选择一个转场效果
-                        trans_options = list(self.transitions.keys())
-                        trans_options = [t for t in trans_options if t not in ["随机", "无"]]
-                        selected_trans = random.choice(trans_options)
-                        print(f"    随机选择转场: '{selected_trans}'")
-                        trans_func = self.transitions.get(selected_trans)
+                        trans_func = self.get_transition_function(trans_name)
                     else:
                         trans_func = self.transitions.get(trans_name)
                     
@@ -97,24 +117,21 @@ class TransitionService:
                         result_clips[i] = trans_clip
         else:
             # 使用全局转场效果
-            print(f"使用全局转场效果: '{transition}'")
+            print(f"使用全局转场效果: '{transition_name}'")
             
             # 如果是"无"转场，直接返回原始片段
-            if transition == "无" or self.transitions.get(transition) == "none":
+            if transition_name == "无" or self.transitions.get(transition_name) == "none":
                 print("  不应用任何转场效果")
                 return result_clips
             
             # 如果是随机转场，为每个连接点随机选择不同的转场
-            if transition == "随机" or self.transitions.get(transition) == "random":
+            if transition_name == "随机" or self.transitions.get(transition_name) == "random":
                 print("  为每个连接点随机选择转场效果")
                 for i in range(1, len(clips)):
                     # 随机选择一个转场效果
-                    trans_options = list(self.transitions.keys())
-                    trans_options = [t for t in trans_options if t not in ["随机", "无"]]
-                    selected_trans = random.choice(trans_options)
-                    trans_func = self.transitions.get(selected_trans)
+                    trans_func = self.get_transition_function(transition_name)
                     
-                    print(f"  片段 {i+1}: 随机选择转场 '{selected_trans}'")
+                    print(f"  片段 {i+1}: 随机选择转场 '{transition_name}'")
                     
                     # 应用随机选择的转场
                     if callable(trans_func):
@@ -122,7 +139,7 @@ class TransitionService:
                         result_clips[i] = trans_clip
             else:
                 # 对所有连接点应用相同的转场
-                trans_func = self.transitions.get(transition)
+                trans_func = self.transitions.get(transition_name)
                 if callable(trans_func):
                     for i in range(1, len(clips)):
                         print(f"  应用转场到片段 {i+1}/{len(clips)}")
@@ -131,13 +148,13 @@ class TransitionService:
         
         return result_clips
     
-    def create_composite_transition(self, clips: List[VideoClip], transition: str, duration: float, custom_transitions: List[str] = None) -> VideoClip:
+    def create_composite_transition(self, clips: List[VideoClip], transition_name: str, duration: float, custom_transitions: List[str] = None) -> VideoClip:
         """
         创建一个包含所有片段和转场效果的合成视频
         
         Args:
             clips: 视频片段列表
-            transition: 默认转场效果名称
+            transition_name: 默认转场效果名称
             duration: 转场持续时间
             custom_transitions: 自定义转场效果列表（如果提供）
             
@@ -155,7 +172,7 @@ class TransitionService:
         
         # 为其余每个片段创建转场
         for i in range(1, len(clips)):
-            current_transition = transition
+            current_transition = transition_name
             
             # 如果有自定义转场，并且数量足够，使用自定义转场
             if custom_transitions and i-1 < len(custom_transitions):
@@ -175,11 +192,7 @@ class TransitionService:
             # 处理随机转场
             if current_transition == "随机" or self.transitions.get(current_transition) == "random":
                 # 随机选择一个转场效果
-                transition_options = list(self.transitions.keys())
-                transition_options = [t for t in transition_options if t not in ["随机", "无"]]
-                selected_transition = random.choice(transition_options)
-                current_transition = selected_transition
-                print(f"  片段 {i+1}: 随机选择转场 '{selected_transition}'")
+                trans_func = self.get_transition_function(current_transition)
             
             # 获取转场函数
             transition_func = self.transitions.get(current_transition)
@@ -541,4 +554,8 @@ class TransitionService:
         if clip2.audio is not None:
             new_clip = new_clip.set_audio(clip2.audio)
         
-        return new_clip 
+        return new_clip
+    
+    def _no_transition(self, clip1: VideoClip, clip2: VideoClip, duration: float) -> VideoClip:
+        """无转场效果"""
+        return clip2 

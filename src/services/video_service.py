@@ -11,6 +11,7 @@ import numpy as np
 import time
 import cv2
 import uuid
+import traceback
 
 # 修复 Pillow 兼容性问题
 try:
@@ -63,8 +64,32 @@ class VideoService:
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"图片文件未找到: {image_path}")
         
-        # 获取持续时间
-        duration = item.get("duration", self.default_duration)
+        # 获取片段ID（如果有）
+        clip_id = item.get("id", None)
+        print(f"\n===== 开始创建片段 {clip_id} =====")
+        
+        # 先获取音频时长（如果有音频）
+        audio_path = item.get("audio_path")
+        audio_clip = None
+        audio_duration = 0
+        
+        if audio_path:
+            # 确保路径是字符串
+            if hasattr(audio_path, '__fspath__'):
+                audio_path = str(audio_path)
+            
+            if os.path.exists(audio_path):
+                audio_clip = AudioFileClip(audio_path)
+                audio_duration = audio_clip.duration
+                print(f"检测到音频: {audio_path}, 时长: {audio_duration:.2f}秒")
+        
+        # 确定视频片段时长：优先使用音频时长，其次是用户指定时长，最后是默认时长
+        if audio_duration > 0:
+            duration = audio_duration
+            print(f"使用音频时长 {duration:.2f}秒 作为视频片段时长")
+        else:
+            duration = item.get("duration", self.default_duration)
+            print(f"使用指定时长 {duration:.2f}秒 作为视频片段时长")
         
         # 加载图像
         image_clip = ImageClip(image_path).set_duration(duration)
@@ -84,30 +109,19 @@ class VideoService:
                 t = i / 10
                 print(f"  t={t:.1f}, value={curve_func(t):.4f}")
             # 应用动画效果
-            image_clip = self.apply_opencv_animation(image_clip, animation_settings, duration)
+            image_clip = self.apply_opencv_animation(image_clip, animation_settings, duration, clip_id)
         
         # 设置音频（如果有）
-        audio_path = item.get("audio_path")
-        if audio_path:
-            # 确保路径是字符串
-            if hasattr(audio_path, '__fspath__'):  # 检查是否是Path对象
-                audio_path = str(audio_path)
-                
-            if os.path.exists(audio_path):
-                audio_clip = AudioFileClip(audio_path)
-                # 检查音频时长，如果音频时长超过视频时长，则延长视频时长以匹配音频
-                if audio_clip.duration > duration:
-                    # 延长视频时长以匹配音频
-                    print(f"音频时长({audio_clip.duration:.2f}s)超过视频时长({duration:.2f}s)，延长视频时长")
-                    image_clip = image_clip.set_duration(audio_clip.duration)
-                elif audio_clip.duration < duration:
-                    # 选择延长音频
-                    audio_clip = audio_clip.fx(vfx.loop, duration=duration)
-                image_clip = image_clip.set_audio(audio_clip)
+        if audio_clip:
+            # 设置音频
+            image_clip = image_clip.set_audio(audio_clip)
+            print(f"已添加音频: {audio_path}, 持续时间: {audio_clip.duration:.2f}s")
+        
+        print(f"===== 片段 {clip_id} 创建完成，持续时间: {duration:.2f}s =====\n")
         
         return image_clip
     
-    def apply_opencv_animation(self, clip, animation_params, duration):
+    def apply_opencv_animation(self, clip, animation_params, duration, clip_id=None):
         """
         使用OpenCV实现高精度的动画效果（包括缩放和位移）
         
@@ -115,6 +129,7 @@ class VideoService:
             clip: 原始视频片段
             animation_params: 动画参数，包括scale和position
             duration: 动画持续时间
+            clip_id: 片段ID，用于日志标识
             
         Returns:
             应用了动画效果的视频片段
@@ -127,16 +142,26 @@ class VideoService:
         # 获取曲线函数
         curve_func = self.animation_service.get_curve_function(curve_name)
         
+        # 为日志添加片段ID标识
+        clip_identifier = f"[片段{clip_id}]" if clip_id else ""
+        
+        # 打印更详细的动画参数
+        print(f"\n{clip_identifier}开始处理视频片段，应用动画:")
+        print(f"{clip_identifier}动画时长: {duration:.2f}秒")
+        print(f"{clip_identifier}缩放: 起始={start_scale:.2f} -> 结束={end_scale:.2f}")
+        print(f"{clip_identifier}位移: 起始=({start_pos[0]:.3f}, {start_pos[1]:.3f}) -> 结束=({end_pos[0]:.3f}, {end_pos[1]:.3f})")
+        print(f"{clip_identifier}曲线: '{curve_name}'")
+        
         # 打印曲线值，用于调试
-        print(f"曲线'{curve_name}'在不同时间点的值:")
+        print(f"{clip_identifier}曲线'{curve_name}'在不同时间点的值:")
         for i in range(11):
             t = i / 10
-            print(f"  t={t:.1f}, value={curve_func(t):.4f}")
+            print(f"{clip_identifier}  t={t:.1f}, value={curve_func(t):.4f}")
         
         # 预计算每一帧的参数 - 使用更多的采样点进行过采样，减少抖动
         # 通过预计算和高精度插值减少抖动
         frame_count = int(duration * self.default_fps * 3)  # 3倍过采样
-        print(f"t=0.00, progress=0.0000, curve_value=0.0000, scale={start_scale:.4f}")
+        print(f"{clip_identifier}t=0.00, progress=0.0000, curve_value=0.0000, scale={start_scale:.4f}")
         
         # 定义处理函数
         def process_frame(get_frame, t):
@@ -160,7 +185,7 @@ class VideoService:
             
             # 如果是第一次处理该时间点，打印调试信息
             if int(t * 100) % 3 == 0:  # 每0.03秒打印一次
-                print(f"t={t:.2f}, progress={progress:.4f}, curve_value={curve_value:.4f}, scale={current_scale:.4f}")
+                print(f"{clip_identifier}t={t:.2f}, progress={progress:.4f}, curve_value={curve_value:.4f}, scale={current_scale:.4f}, pos=({current_x:.4f}, {current_y:.4f})")
             
             # 使用OpenCV进行高质量缩放和移动
             h, w = frame.shape[:2]
@@ -241,25 +266,41 @@ class VideoService:
         original_clips = []
         
         try:
+            print("\n" + "="*50)
+            print(f"开始创建视频 - 共 {len(items)} 个片段")
+            print(f"转场效果: {transition}, 时长: {transition_duration}秒")
+            if video_resolution:
+                print(f"输出分辨率: {video_resolution[0]}x{video_resolution[1]}")
+            print(f"输出质量: {output_quality}")
+            if use_custom_transitions:
+                print(f"使用自定义转场: {custom_transitions}")
+            print("="*50 + "\n")
+            
             # 创建每个片段
             print(f"正在处理 {len(items)} 个视频片段...")
             for i, item in enumerate(items):
+                print(f"\n{'*'*30}")
                 print(f"创建片段 {i+1}/{len(items)}...")
                 clip = self.create_clip(item)
                 
                 # 如果指定了视频分辨率，调整所有片段的尺寸
                 if video_resolution:
                     clip = clip.resize(video_resolution)
+                    print(f"已调整片段 {i+1} 的分辨率为 {video_resolution[0]}x{video_resolution[1]}")
                 
                 original_clips.append(clip)
                 clips.append(clip)
+                print(f"片段 {i+1} 创建完成，持续时间: {clip.duration:.2f}秒")
+                print(f"{'*'*30}\n")
             
             # 应用过渡效果
             if len(clips) > 1 and (transition or use_custom_transitions):
-                print("应用转场效果...")
+                print("\n" + "-"*40)
+                print("开始应用转场效果...")
                 # 使用新的转场服务
                 if use_custom_transitions and custom_transitions:
                     # 创建一个合成视频，其中包含定制的转场效果
+                    print(f"应用自定义转场效果: {custom_transitions}")
                     final_clip = self.transition_service.create_composite_transition(
                         clips, 
                         transition, 
@@ -268,6 +309,7 @@ class VideoService:
                     )
                 else:
                     # 应用常规的转场效果
+                    print(f"应用转场效果: {transition}，时长: {transition_duration}秒")
                     clips = self.transition_service.apply_transitions_to_clips(
                         clips, 
                         transition, 
@@ -279,6 +321,8 @@ class VideoService:
                     # 将所有片段连接起来
                     print("合并所有视频片段...")
                     final_clip = concatenate_videoclips(clips, method="compose")
+                print(f"转场效果应用完成，最终视频时长: {final_clip.duration:.2f}秒")
+                print("-"*40 + "\n")
             else:
                 # 无转场效果，直接连接
                 print("合并所有视频片段（无转场）...")
@@ -308,53 +352,61 @@ class VideoService:
                     last_frame = final_clip.get_frame(final_clip.duration - 0.1)
                     padding_clip = ImageClip(last_frame).set_duration(padding_duration)
                     
-                    # 创建新的最终片段
+                    # 将延长片段添加到视频末尾
                     final_clip = concatenate_videoclips([final_clip, padding_clip], method="compose")
+                    print(f"视频已延长，新时长: {final_clip.duration:.2f}秒")
             
-            # 创建输出目录
-            output_path = Path(output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 设置输出视频编码参数
+            # 根据质量设置输出参数
             bitrate = None
-            if output_quality == 'high':
-                preset = 'slow'
-                bitrate = '8000k'
-            elif output_quality == 'low':
-                preset = 'ultrafast'
-                bitrate = '2000k'
-            else:  # medium
-                preset = 'medium'
-                bitrate = '4000k'
+            if output_quality == 'low':
+                bitrate = '1000k'
+            elif output_quality == 'medium':
+                bitrate = '2500k'
+            elif output_quality == 'high':
+                bitrate = '5000k'
             
-            # 保存视频
-            print(f"正在生成视频文件: {output_path}")
+            print(f"\n正在导出视频到 {output_path}...")
+            if bitrate:
+                print(f"使用比特率: {bitrate}")
+            
+            # 确保输出目录存在
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            # 写入视频文件
             final_clip.write_videofile(
-                str(output_path),
+                output_path,
                 codec='libx264',
-                fps=self.default_fps,
-                threads=min(4, os.cpu_count() or 2),
-                preset=preset,
+                audio_codec='aac',
                 bitrate=bitrate,
-                audio_codec='aac' if any(c.audio is not None for c in clips) else None
+                fps=self.default_fps,
+                threads=4
             )
             
-            # 清理临时剪辑
             print("清理临时资源...")
-            for clip in original_clips:
-                clip.close()
+            # 释放资源
             final_clip.close()
+            for clip in clips:
+                if hasattr(clip, 'close'):
+                    clip.close()
             
             print(f"视频生成完成: {output_path}")
-            return str(output_path)
+            print("="*50 + "\n")
+            
+            return output_path
+            
         except Exception as e:
-            print(f"生成视频时出错: {e}")
-            # 清理临时资源
-            for clip in original_clips:
-                try:
-                    clip.close()
-                except:
-                    pass
+            # 清理资源
+            for clip in clips:
+                if hasattr(clip, 'close'):
+                    try:
+                        clip.close()
+                    except:
+                        pass
+            
+            print(f"生成视频时出错: {str(e)}")
+            traceback.print_exc()
             raise
     
     def preview_clip(self, item: dict, output_filename: str) -> str:
