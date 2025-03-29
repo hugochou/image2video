@@ -95,13 +95,14 @@ class VideoService:
                 
             if os.path.exists(audio_path):
                 audio_clip = AudioFileClip(audio_path)
-                # 如果音频时长小于片段时长，循环音频或裁剪
-                if audio_clip.duration < duration:
+                # 检查音频时长，如果音频时长超过视频时长，则延长视频时长以匹配音频
+                if audio_clip.duration > duration:
+                    # 延长视频时长以匹配音频
+                    print(f"音频时长({audio_clip.duration:.2f}s)超过视频时长({duration:.2f}s)，延长视频时长")
+                    image_clip = image_clip.set_duration(audio_clip.duration)
+                elif audio_clip.duration < duration:
                     # 选择延长音频
                     audio_clip = audio_clip.fx(vfx.loop, duration=duration)
-                elif audio_clip.duration > duration:
-                    # 裁剪音频
-                    audio_clip = audio_clip.subclip(0, duration)
                 image_clip = image_clip.set_audio(audio_clip)
         
         return image_clip
@@ -164,11 +165,28 @@ class VideoService:
             # 使用OpenCV进行高质量缩放和移动
             h, w = frame.shape[:2]
             
-            # 计算缩放矩阵
-            M_scale = np.float32([
-                [current_scale, 0, w * (1 - current_scale) / 2],
-                [0, current_scale, h * (1 - current_scale) / 2]
-            ])
+            # 计算平移后是否会有黑边
+            max_x_shift = abs(current_x)
+            max_y_shift = abs(current_y)
+            
+            # 如果有平移，增加缩放以防止黑边
+            if max_x_shift > 0 or max_y_shift > 0:
+                # 计算需要增加的缩放比例，确保移动后不会露出黑边
+                border_scale = max(1.0, 1.0 + 2 * max_x_shift, 1.0 + 2 * max_y_shift)
+                # 合并当前缩放和防黑边缩放
+                effective_scale = current_scale * border_scale
+                
+                # 调整缩放矩阵
+                M_scale = np.float32([
+                    [effective_scale, 0, w * (1 - effective_scale) / 2],
+                    [0, effective_scale, h * (1 - effective_scale) / 2]
+                ])
+            else:
+                # 没有平移，使用原始缩放
+                M_scale = np.float32([
+                    [current_scale, 0, w * (1 - current_scale) / 2],
+                    [0, current_scale, h * (1 - current_scale) / 2]
+                ])
             
             # 计算位移矩阵
             M_translate = np.float32([
@@ -178,11 +196,11 @@ class VideoService:
             
             # 应用缩放
             if current_scale != 1.0:
-                frame = cv2.warpAffine(frame, M_scale, (w, h), flags=cv2.INTER_CUBIC)
+                frame = cv2.warpAffine(frame, M_scale, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
             
             # 应用位移
             if current_x != 0 or current_y != 0:
-                frame = cv2.warpAffine(frame, M_translate, (w, h), flags=cv2.INTER_CUBIC)
+                frame = cv2.warpAffine(frame, M_translate, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
             
             return frame
         
@@ -237,19 +255,61 @@ class VideoService:
                 clips.append(clip)
             
             # 应用过渡效果
-            if transition or use_custom_transitions:
+            if len(clips) > 1 and (transition or use_custom_transitions):
                 print("应用转场效果...")
-                clips = self.transition_service.apply_transitions_to_clips(
-                    clips, 
-                    transition, 
-                    transition_duration,
-                    use_custom_transitions,
-                    custom_transitions
-                )
+                # 使用新的转场服务
+                if use_custom_transitions and custom_transitions:
+                    # 创建一个合成视频，其中包含定制的转场效果
+                    final_clip = self.transition_service.create_composite_transition(
+                        clips, 
+                        transition, 
+                        transition_duration,
+                        custom_transitions
+                    )
+                else:
+                    # 应用常规的转场效果
+                    clips = self.transition_service.apply_transitions_to_clips(
+                        clips, 
+                        transition, 
+                        transition_duration,
+                        use_custom_transitions,
+                        custom_transitions
+                    )
+                    
+                    # 将所有片段连接起来
+                    print("合并所有视频片段...")
+                    final_clip = concatenate_videoclips(clips, method="compose")
+            else:
+                # 无转场效果，直接连接
+                print("合并所有视频片段（无转场）...")
+                final_clip = concatenate_videoclips(clips, method="compose")
             
-            # 将所有片段连接起来
-            print("合并所有视频片段...")
-            final_clip = concatenate_videoclips(clips, method="compose")
+            # 检查最后一个片段是否有音频，如果有，确保视频长度不会导致音频被截断
+            if len(original_clips) > 0 and original_clips[-1].audio is not None:
+                last_clip = original_clips[-1]
+                last_audio = last_clip.audio
+                
+                # 计算原始片段的总时长（不含转场）
+                original_duration = sum(clip.duration for clip in original_clips)
+                
+                # 计算最后片段的结束时间
+                last_clip_end_time = original_duration
+                
+                # 计算最后一个音频的结束时间
+                last_audio_end_time = last_clip_end_time
+                
+                # 如果最后一个音频的结束时间超过了视频的总时长，需要延长视频
+                if last_audio_end_time > final_clip.duration:
+                    # 创建一个静态片段来延长视频
+                    print(f"延长视频以确保音频播放完整 (音频结束时间: {last_audio_end_time:.2f}s, 当前视频时长: {final_clip.duration:.2f}s)")
+                    padding_duration = last_audio_end_time - final_clip.duration
+                    
+                    # 获取最后一帧作为延长片段的图像
+                    last_frame = final_clip.get_frame(final_clip.duration - 0.1)
+                    padding_clip = ImageClip(last_frame).set_duration(padding_duration)
+                    
+                    # 创建新的最终片段
+                    final_clip = concatenate_videoclips([final_clip, padding_clip], method="compose")
             
             # 创建输出目录
             output_path = Path(output_path)

@@ -384,11 +384,15 @@ class MainWindow(QMainWindow):
                 }
             )
             
+            # 关闭进度对话框
             progress_dialog.close()
             
             if output_path:
                 self.last_video_path = output_path
                 self.preview_button.setEnabled(True)
+                
+                # 使用状态栏显示完成消息，而不是弹出对话框
+                self.statusBar().showMessage(f"视频已生成：{output_path}")
                 
                 # 询问是否立即预览
                 reply = QMessageBox.question(
@@ -401,8 +405,6 @@ class MainWindow(QMainWindow):
                 
                 if reply == QMessageBox.StandardButton.Yes:
                     self.preview_video()
-                
-                self.statusBar().showMessage(f"视频已生成：{output_path}")
                 
         except Exception as e:
             progress_dialog.close()
