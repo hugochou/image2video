@@ -3,7 +3,8 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QFileDialog, QMessageBox, QProgressDialog,
                              QGridLayout, QFrame, QSpinBox, QDoubleSpinBox,
                              QCheckBox, QGroupBox, QFormLayout, QComboBox,
-                             QInputDialog, QSlider, QApplication)
+                             QInputDialog, QSlider, QApplication, QDialog,
+                             QDialogButtonBox, QListWidget, QListWidgetItem)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage
 from pathlib import Path
@@ -323,66 +324,89 @@ class MainWindow(QMainWindow):
             self.audio_service.preview_audio(item.audio_path)
     
     def generate_video(self):
-        """生成视频"""
+        """生成完整视频"""
         if not self.image_items:
-            QMessageBox.warning(self, "警告", "请先添加图片")
-            return
-            
-        # 检查是否所有图片都有语音
-        items_without_audio = [item for item in self.image_items if not item.has_audio]
-        if items_without_audio:
-            QMessageBox.warning(self, "警告", "请先生成所有图片的语音")
+            QMessageBox.warning(self, "提示", "请先添加图片")
             return
         
-        # 更新所有项目的动画设置
-        for row in range(1, self.content_layout.rowCount()):
-            item = self.image_items[row - 1]
-            animation_widget = self.content_layout.itemAtPosition(row, 4).widget()
-            
-            # 获取当前选择的预设动画和曲线
-            preset_combo = animation_widget.findChild(QComboBox, "preset_combo")
-            curve_combo = animation_widget.findChild(QComboBox, "curve_combo")
-            
-            preset_name = preset_combo.currentText()
-            curve_name = curve_combo.currentText()
-            
-            if preset_name == "随机":
-                item.animation = "随机"
-            else:
-                # 获取预设动画设置
-                preset = self.video_service.animation_service.preset_animations[preset_name].copy()
-                # 更新动画曲线
-                preset['curve'] = curve_name
-                item.animation = preset
-        
-        # 选择过渡效果
-        transition, ok = QInputDialog.getItem(
-            self,
-            "选择过渡效果",
-            "请选择视频片段之间的过渡效果：",
-            list(self.video_service.transitions.keys()),
-            0,
-            False
-        )
-        
-        if not ok:
+        # 高级设置对话框
+        dialog = VideoSettingsDialog(self, self.video_service)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         
-        # 创建输出目录
-        output_dir = Path("output")
-        output_dir.mkdir(exist_ok=True)
+        # 获取设置
+        settings = dialog.get_settings()
         
-        # 生成视频
-        output_path = self.video_service.create_video(
-            [item.to_dict() for item in self.image_items],
-            str(output_dir / "final_video.mp4"),
-            transition
-        )
+        # 检查是否有动画设置未设置的项目
+        items_without_animation = []
+        for item in self.image_items:
+            if not hasattr(item, 'animation') or not item.animation:
+                items_without_animation.append(item)
         
-        if output_path:
-            self.last_video_path = output_path
-            self.preview_button.setEnabled(True)
-            self.statusBar().showMessage(f"视频已生成：{output_path}")
+        # 如果有未设置动画的项目，询问用户是否自动应用随机动画
+        if items_without_animation:
+            reply = QMessageBox.question(
+                self,
+                "动画设置",
+                f"有 {len(items_without_animation)} 个项目未设置动画效果，是否自动应用随机动画？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # 自动应用随机动画
+                for item in items_without_animation:
+                    item.animation = "随机"
+        
+        # 显示处理进度对话框
+        progress_dialog = QMessageBox(self)
+        progress_dialog.setWindowTitle("处理中")
+        progress_dialog.setText("正在生成视频，请稍候...")
+        progress_dialog.setStandardButtons(QMessageBox.StandardButton.NoButton)
+        progress_dialog.show()
+        
+        try:
+            # 创建输出目录
+            output_dir = Path("output")
+            output_dir.mkdir(exist_ok=True)
+            
+            # 生成视频
+            output_path = self.video_service.create_video(
+                [item.to_dict() for item in self.image_items],
+                str(output_dir / "final_video.mp4"),
+                settings["transition"],
+                settings["transition_duration"],
+                {
+                    "use_custom_transitions": settings["use_custom_transitions"],
+                    "custom_transitions": settings["custom_transitions"],
+                    "video_resolution": settings["video_resolution"],
+                    "output_quality": settings["output_quality"]
+                }
+            )
+            
+            progress_dialog.close()
+            
+            if output_path:
+                self.last_video_path = output_path
+                self.preview_button.setEnabled(True)
+                
+                # 询问是否立即预览
+                reply = QMessageBox.question(
+                    self,
+                    "视频已生成",
+                    f"视频已成功生成：{output_path}\n是否立即播放？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.preview_video()
+                
+                self.statusBar().showMessage(f"视频已生成：{output_path}")
+                
+        except Exception as e:
+            progress_dialog.close()
+            QMessageBox.critical(self, "错误", f"生成视频失败: {str(e)}")
     
     def preview_video(self):
         """预览已生成的视频"""
@@ -421,71 +445,74 @@ class MainWindow(QMainWindow):
         self.video_service.open_with_default_player(output_path)
 
     def create_animation_settings(self, item: ImageItem) -> QWidget:
-        """创建动画设置部分"""
-        animation_group = QGroupBox("动画设置")
-        animation_layout = QVBoxLayout()
+        """
+        创建动画设置控件
+        包含预设选择和曲线选择
+        """
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
         
-        # 预设动画选择
+        # 动画预设选择
         preset_layout = QHBoxLayout()
-        preset_label = QLabel("预设动画:")
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        
         preset_combo = QComboBox()
-        preset_combo.setObjectName("preset_combo")  # 设置对象名称
-        preset_combo.addItems(self.video_service.animation_service.preset_animations.keys())
-        preset_layout.addWidget(preset_label)
-        preset_layout.addWidget(preset_combo)
-        animation_layout.addLayout(preset_layout)
+        preset_combo.setObjectName("preset_combo")
+        preset_combo.addItems(list(self.video_service.animation_service.preset_animations.keys()) + ["随机"])
         
-        # 动画曲线选择
-        curve_layout = QHBoxLayout()
-        curve_label = QLabel("动画曲线:")
-        curve_combo = QComboBox()
-        curve_combo.setObjectName("curve_combo")  # 设置对象名称
-        curve_combo.addItems(self.video_service.animation_service.animation_curves.keys())
-        curve_layout.addWidget(curve_label)
-        curve_layout.addWidget(curve_combo)
-        animation_layout.addLayout(curve_layout)
-        
-        # 预览按钮
-        preview_button = QPushButton("预览动画")
-        preview_button.clicked.connect(lambda: self.preview_animation(item))
-        animation_layout.addWidget(preview_button)
-        
-        # 设置初始值
         if hasattr(item, 'animation') and item.animation:
             if isinstance(item.animation, str):
                 preset_combo.setCurrentText(item.animation)
-            elif isinstance(item.animation, dict):
-                if 'curve' in item.animation:
-                    curve_combo.setCurrentText(item.animation['curve'])
+            elif isinstance(item.animation, dict) and 'name' in item.animation:
+                preset_combo.setCurrentText(item.animation['name'])
+        
+        preset_label = QLabel("动画:")
+        preset_layout.addWidget(preset_label)
+        preset_layout.addWidget(preset_combo, 1)
+        
+        # 曲线选择
+        curve_layout = QHBoxLayout()
+        curve_layout.setContentsMargins(0, 0, 0, 0)
+        
+        curve_combo = QComboBox()
+        curve_combo.setObjectName("curve_combo")
+        curve_combo.addItems(self.video_service.animation_service.curve_functions.keys())
+        
+        if hasattr(item, 'animation') and isinstance(item.animation, dict) and 'curve' in item.animation:
+            curve_combo.setCurrentText(item.animation['curve'])
+        else:
+            curve_combo.setCurrentText("缓入缓出")  # 默认曲线
+        
+        curve_label = QLabel("曲线:")
+        curve_layout.addWidget(curve_label)
+        curve_layout.addWidget(curve_combo, 1)
+        
+        # 添加到主布局
+        layout.addLayout(preset_layout)
+        layout.addLayout(curve_layout)
         
         # 连接信号
-        preset_combo.currentTextChanged.connect(lambda text: self.update_animation_settings(item))
-        curve_combo.currentTextChanged.connect(lambda text: self.update_animation_settings(item))
+        preset_combo.currentTextChanged.connect(lambda text: self.update_animation_settings(item, preset_combo, curve_combo))
+        curve_combo.currentTextChanged.connect(lambda text: self.update_animation_settings(item, preset_combo, curve_combo))
         
-        animation_group.setLayout(animation_layout)
-        return animation_group
+        return container
 
-    def update_animation_settings(self, item: ImageItem):
+    def update_animation_settings(self, item: ImageItem, preset_combo: QComboBox, curve_combo: QComboBox):
         """更新动画设置"""
-        # 获取当前行的动画设置组件
-        row = self.image_items.index(item) + 1
-        animation_widget = self.content_layout.itemAtPosition(row, 4).widget()
-        
         # 获取当前选择的预设动画和曲线
-        preset_combo = animation_widget.findChild(QComboBox, "preset_combo")
-        curve_combo = animation_widget.findChild(QComboBox, "curve_combo")
-        
         preset_name = preset_combo.currentText()
         curve_name = curve_combo.currentText()
         
         if preset_name == "随机":
+            # 使用随机动画
             item.animation = "随机"
         else:
-            # 获取预设动画设置
-            preset = self.video_service.animation_service.preset_animations[preset_name].copy()
-            # 更新动画曲线
-            preset['curve'] = curve_name
-            item.animation = preset
+            # 使用预设动画，但自定义曲线
+            animation_settings = self.video_service.animation_service.preset_animations.get(preset_name, {}).copy()
+            # 更新曲线
+            animation_settings['curve'] = curve_name
+            item.animation = animation_settings
 
     def preview_animation(self, item: ImageItem):
         """预览动画效果"""
@@ -503,4 +530,149 @@ class MainWindow(QMainWindow):
             self.video_service.open_with_default_player(output_path)
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"预览失败: {str(e)}") 
+            QMessageBox.critical(self, "错误", f"预览失败: {str(e)}")
+
+class VideoSettingsDialog(QDialog):
+    """视频设置对话框"""
+    
+    def __init__(self, parent=None, video_service=None):
+        super().__init__(parent)
+        self.video_service = video_service
+        self.setWindowTitle("视频设置")
+        self.setMinimumWidth(400)
+        
+        # 创建布局
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        
+        # 转场效果
+        self.transition_combo = QComboBox()
+        self.transition_combo.addItems(list(self.video_service.transitions.keys()))
+        self.transition_combo.setCurrentText("淡入淡出")  # 默认选择
+        form_layout.addRow("转场效果:", self.transition_combo)
+        
+        # 转场时长
+        self.duration_spin = QDoubleSpinBox()
+        self.duration_spin.setRange(0.1, 3.0)
+        self.duration_spin.setSingleStep(0.1)
+        self.duration_spin.setValue(0.7)
+        self.duration_spin.setSuffix(" 秒")
+        form_layout.addRow("转场时长:", self.duration_spin)
+        
+        # 自定义转场选项
+        self.custom_transitions_check = QCheckBox("为每个片段设置不同的转场效果")
+        self.custom_transitions_check.setChecked(False)
+        self.custom_transitions_check.stateChanged.connect(self.toggle_custom_transitions)
+        form_layout.addRow("", self.custom_transitions_check)
+        
+        # 自定义转场列表
+        self.custom_transitions_widget = QWidget()
+        self.custom_transitions_layout = QVBoxLayout(self.custom_transitions_widget)
+        self.custom_transitions_list = QListWidget()
+        self.custom_transitions_layout.addWidget(QLabel("片段间转场:"))
+        self.custom_transitions_layout.addWidget(self.custom_transitions_list)
+        self.custom_transitions_widget.setVisible(False)
+        form_layout.addRow("", self.custom_transitions_widget)
+        
+        # 视频分辨率选项
+        self.resolution_check = QCheckBox("指定输出分辨率")
+        self.resolution_check.setChecked(False)
+        self.resolution_check.stateChanged.connect(self.toggle_resolution)
+        form_layout.addRow("", self.resolution_check)
+        
+        # 分辨率设置
+        self.resolution_widget = QWidget()
+        resolution_layout = QHBoxLayout(self.resolution_widget)
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(320, 3840)
+        self.width_spin.setSingleStep(10)
+        self.width_spin.setValue(1920)
+        self.height_spin = QSpinBox()
+        self.height_spin.setRange(240, 2160)
+        self.height_spin.setSingleStep(10)
+        self.height_spin.setValue(1080)
+        resolution_layout.addWidget(self.width_spin)
+        resolution_layout.addWidget(QLabel("x"))
+        resolution_layout.addWidget(self.height_spin)
+        self.resolution_widget.setVisible(False)
+        form_layout.addRow("分辨率:", self.resolution_widget)
+        
+        # 输出质量
+        self.quality_combo = QComboBox()
+        self.quality_combo.addItems(["低", "中", "高"])
+        self.quality_combo.setCurrentText("中")
+        form_layout.addRow("输出质量:", self.quality_combo)
+        
+        layout.addLayout(form_layout)
+        
+        # 按钮
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        
+        # 初始化自定义转场列表
+        self.update_custom_transitions_list()
+    
+    def toggle_custom_transitions(self, state):
+        """切换自定义转场选项的可见性"""
+        self.custom_transitions_widget.setVisible(state != 0)
+        if state != 0:
+            self.update_custom_transitions_list()
+    
+    def toggle_resolution(self, state):
+        """切换分辨率设置的可见性"""
+        self.resolution_widget.setVisible(state != 0)
+    
+    def update_custom_transitions_list(self):
+        """更新自定义转场列表"""
+        # 获取父窗口的图片项目数量
+        parent = self.parent()
+        if hasattr(parent, 'image_items'):
+            image_count = len(parent.image_items)
+            transition_count = max(0, image_count - 1)
+            
+            self.custom_transitions_list.clear()
+            
+            transition_names = list(self.video_service.transitions.keys())
+            default_transition = self.transition_combo.currentText()
+            
+            for i in range(transition_count):
+                item = QListWidgetItem(f"片段 {i+1} 到 片段 {i+2}")
+                self.custom_transitions_list.addItem(item)
+                
+                # 添加选择框
+                combo = QComboBox()
+                combo.addItems(transition_names)
+                combo.setCurrentText(default_transition)
+                
+                self.custom_transitions_list.setItemWidget(item, combo)
+    
+    def get_settings(self) -> dict:
+        """获取设置"""
+        # 获取输出质量
+        quality_map = {"低": "low", "中": "medium", "高": "high"}
+        
+        # 获取自定义转场列表
+        custom_transitions = []
+        if self.custom_transitions_check.isChecked():
+            for i in range(self.custom_transitions_list.count()):
+                item = self.custom_transitions_list.item(i)
+                combo = self.custom_transitions_list.itemWidget(item)
+                custom_transitions.append(combo.currentText())
+        
+        # 获取分辨率
+        resolution = None
+        if self.resolution_check.isChecked():
+            resolution = (self.width_spin.value(), self.height_spin.value())
+        
+        return {
+            "transition": self.transition_combo.currentText(),
+            "transition_duration": self.duration_spin.value(),
+            "use_custom_transitions": self.custom_transitions_check.isChecked(),
+            "custom_transitions": custom_transitions,
+            "video_resolution": resolution,
+            "output_quality": quality_map[self.quality_combo.currentText()]
+        } 
