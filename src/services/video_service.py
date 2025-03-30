@@ -12,6 +12,8 @@ import time
 import cv2
 import uuid
 import traceback
+import datetime
+import os.path
 
 # 修复 Pillow 兼容性问题
 try:
@@ -29,7 +31,7 @@ class VideoService:
     def __init__(self):
         self.output_dir = Path("output")
         self.video_dir = self.output_dir / "video"
-        self.preview_dir = self.video_dir / "previews"
+        self.preview_dir = self.video_dir / "previews"  # 单段视频预览目录
         self.output_dir.mkdir(exist_ok=True)
         self.video_dir.mkdir(exist_ok=True)
         self.preview_dir.mkdir(exist_ok=True)
@@ -66,7 +68,9 @@ class VideoService:
         
         # 获取片段ID（如果有）
         clip_id = item.get("id", None)
-        print(f"\n===== 开始创建片段 {clip_id} =====")
+        # 获取图片文件名（不含扩展名）
+        image_filename = os.path.splitext(os.path.basename(image_path))[0]
+        print(f"\n===== 开始创建片段 {clip_id} (图片: {image_filename}) =====")
         
         # 先获取音频时长（如果有音频）
         audio_path = item.get("audio_path")
@@ -117,7 +121,7 @@ class VideoService:
             image_clip = image_clip.set_audio(audio_clip)
             print(f"已添加音频: {audio_path}, 持续时间: {audio_clip.duration:.2f}s")
         
-        print(f"===== 片段 {clip_id} 创建完成，持续时间: {duration:.2f}s =====\n")
+        print(f"===== 片段 {clip_id} (图片: {image_filename}) 创建完成，持续时间: {duration:.2f}s =====\n")
         
         return image_clip
     
@@ -262,6 +266,26 @@ class VideoService:
         video_resolution = advanced_options.get('video_resolution', None)
         output_quality = advanced_options.get('output_quality', 'medium')
         
+        # 生成基于日期时间的视频文件名
+        now = datetime.datetime.now()
+        date_time_str = now.strftime("%Y%m%d_%H%M")
+        
+        # 确保输出目录存在
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # 生成新的输出路径，使用时间戳
+        # 基于原始输出路径获取目录
+        original_dir = os.path.dirname(output_path)
+        
+        # 生成新的文件名（使用时间戳+随机数）
+        random_id = str(uuid.uuid4())[:4]
+        new_filename = f"final_{date_time_str}_{random_id}.mp4"
+        
+        # 组合新的输出路径
+        output_path = os.path.join(original_dir, new_filename)
+        
         clips = []
         original_clips = []
         
@@ -269,6 +293,7 @@ class VideoService:
             print("\n" + "="*50)
             print(f"开始创建视频 - 共 {len(items)} 个片段")
             print(f"转场效果: {transition}, 时长: {transition_duration}秒")
+            print(f"输出文件: {output_path}")
             if video_resolution:
                 print(f"输出分辨率: {video_resolution[0]}x{video_resolution[1]}")
             print(f"输出质量: {output_quality}")
@@ -281,6 +306,12 @@ class VideoService:
             for i, item in enumerate(items):
                 print(f"\n{'*'*30}")
                 print(f"创建片段 {i+1}/{len(items)}...")
+                
+                # 检查是否需要先生成音频（如果有文本但没有音频）
+                if 'text' in item and item['text'] and ('audio_path' not in item or not item['audio_path']):
+                    # 需要先生成音频，这部分会在controller层实现
+                    print(f"片段 {i+1} 有文本但无音频，将由控制器处理")
+                
                 clip = self.create_clip(item)
                 
                 # 如果指定了视频分辨率，调整所有片段的尺寸
@@ -290,7 +321,14 @@ class VideoService:
                 
                 original_clips.append(clip)
                 clips.append(clip)
-                print(f"片段 {i+1} 创建完成，持续时间: {clip.duration:.2f}秒")
+                
+                # 获取图片文件名
+                image_path = item.get("image_path", "")
+                if isinstance(image_path, Path):
+                    image_path = str(image_path)
+                image_filename = os.path.splitext(os.path.basename(image_path))[0] if image_path else f"segment_{i+1}"
+                
+                print(f"片段 {i+1} ({image_filename}) 创建完成，持续时间: {clip.duration:.2f}秒")
                 print(f"{'*'*30}\n")
             
             # 应用过渡效果
@@ -369,11 +407,6 @@ class VideoService:
             if bitrate:
                 print(f"使用比特率: {bitrate}")
             
-            # 确保输出目录存在
-            output_dir = os.path.dirname(output_path)
-            if output_dir and not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            
             # 写入视频文件
             final_clip.write_videofile(
                 output_path,
@@ -420,7 +453,15 @@ class VideoService:
                 
             if "audio_path" in preview_item and preview_item["audio_path"] and hasattr(preview_item["audio_path"], '__fspath__'):
                 preview_item["audio_path"] = str(preview_item["audio_path"])
-                
+            
+            # 使用图片文件名作为输出文件名的一部分
+            image_path = preview_item.get("image_path", "")
+            image_filename = os.path.splitext(os.path.basename(image_path))[0] if image_path else "clip"
+            
+            # 创建基于图片名称的输出文件名
+            if not output_filename:
+                output_filename = f"preview_{image_filename}_{uuid.uuid4()}.mp4"
+            
             # 创建片段
             clip = self.create_clip(preview_item)
             

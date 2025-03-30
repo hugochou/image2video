@@ -19,36 +19,27 @@ import time
 from ..models.image_item import ImageItem
 from ..services.audio_service import AudioService
 from ..services.video_service import VideoService
+from ..controllers.audio_controller import AudioController
+from ..controllers.video_controller import VideoController
 
 class AudioGenerationThread(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(bool)
     error = pyqtSignal(str)
     
-    def __init__(self, items: List[ImageItem], audio_service: AudioService):
+    def __init__(self, items: List[ImageItem], audio_controller: AudioController):
         super().__init__()
         self.items = items
-        self.audio_service = audio_service
+        self.audio_controller = audio_controller
     
     def run(self):
         try:
-            # 生成语音
-            for i, item in enumerate(self.items):
-                if not item.text.strip():
-                    continue
-                    
-                try:
-                    # 生成音频文件
-                    audio_path = self.audio_service.generate_speech(
-                        item.text,
-                        f"{item.id}.mp3"
-                    )
-                    if audio_path:
-                        item.audio_path = audio_path
-                        self.progress.emit(i + 1)
-                except Exception as e:
-                    print(f"生成语音失败: {str(e)}")
-                    continue
+            # 批量生成语音
+            results = self.audio_controller.batch_generate_audio(self.items)
+            
+            # 发出进度信号
+            completed = sum(1 for success in results.values() if success)
+            self.progress.emit(completed)
             
             self.finished.emit(True)
         except Exception as e:
@@ -63,8 +54,12 @@ class MainWindow(QMainWindow):
         
         # 初始化数据
         self.image_items: List[ImageItem] = []
+        
+        # 初始化服务和控制器
         self.audio_service = AudioService()
         self.video_service = VideoService()
+        self.audio_controller = AudioController(self.audio_service)
+        self.video_controller = VideoController(self.video_service, self.audio_service)
         
         # 创建主窗口部件
         main_widget = QWidget()
@@ -198,9 +193,9 @@ class MainWindow(QMainWindow):
             return
         
         # 创建音频生成线程
-        self.audio_thread = AudioGenerationThread(self.image_items, self.audio_service)
+        self.audio_thread = AudioGenerationThread(self.image_items, self.audio_controller)
         self.audio_thread.finished.connect(self.on_audio_generation_finished)
-        self.audio_thread.error.connect(self.on_audio_generation_finished)  # 修改为正确的函数名
+        self.audio_thread.error.connect(self.on_audio_generation_finished)  # 使用同一个处理函数处理错误
         self.audio_thread.progress.connect(self.on_audio_generation_progress)
         
         # 创建进度对话框
@@ -213,19 +208,25 @@ class MainWindow(QMainWindow):
         # 开始生成
         self.audio_thread.start()
     
-    def on_audio_generation_finished(self, success: bool = True):
+    def on_audio_generation_finished(self, success_or_error_msg):
         """音频生成完成的回调"""
-        if success:
+        # 判断参数类型，如果是布尔值表示成功完成，如果是字符串表示错误信息
+        if isinstance(success_or_error_msg, bool) and success_or_error_msg:
             self.statusBar().showMessage("语音生成完成")
             # 更新界面
             for row in range(1, self.content_layout.rowCount()):
-                item = self.image_items[row - 1]
-                if item.has_audio:
-                    # 启用试听按钮
-                    preview_button = self.content_layout.itemAtPosition(row, 2).widget()
-                    preview_button.setEnabled(True)
+                if row - 1 < len(self.image_items):
+                    item = self.image_items[row - 1]
+                    if item.has_audio:
+                        # 启用试听按钮
+                        preview_button = self.content_layout.itemAtPosition(row, 2).widget()
+                        preview_button.setEnabled(True)
+        elif isinstance(success_or_error_msg, str):
+            # 这是错误信息
+            QMessageBox.warning(self, "错误", f"语音生成失败: {success_or_error_msg}")
         else:
-            QMessageBox.warning(self, "错误", "语音生成失败")
+            # 未知情况，显示通用错误
+            QMessageBox.warning(self, "错误", "语音生成过程中出现问题")
         
         self.progress_dialog.close()
     
@@ -236,7 +237,7 @@ class MainWindow(QMainWindow):
     def preview_audio(self, item: ImageItem):
         """预览音频"""
         if item.has_audio:
-            self.audio_service.preview_audio(item.audio_path)
+            self.audio_controller.preview_audio(item)
     
     def generate_video(self):
         """生成完整视频"""
@@ -259,26 +260,10 @@ class MainWindow(QMainWindow):
         self.disable_ui_during_processing(True)
         
         try:
-            # 创建输出目录
-            output_dir = Path("output")
-            output_dir.mkdir(exist_ok=True)
-            
-            # 生成视频
-            output_path = self.video_service.create_video(
-                [item.to_dict() for item in self.image_items],
-                str(output_dir / "final_video.mp4"),
-                settings["transition"],
-                settings["transition_duration"],
-                {
-                    "use_custom_transitions": settings["use_custom_transitions"],
-                    "custom_transitions": settings["custom_transitions"],
-                    "video_resolution": settings["video_resolution"],
-                    "output_quality": settings["output_quality"]
-                }
-            )
+            # 使用视频控制器生成视频
+            output_path = self.video_controller.generate_video(self.image_items, settings)
             
             if output_path:
-                self.last_video_path = output_path
                 self.preview_button.setEnabled(True)
                 
                 # 更新状态栏显示完成消息
@@ -315,10 +300,7 @@ class MainWindow(QMainWindow):
     
     def preview_video(self):
         """预览已生成的视频"""
-        if hasattr(self, 'last_video_path') and self.last_video_path:
-            self.video_service.open_with_default_player(self.last_video_path)
-        else:
-            QMessageBox.information(self, "提示", "还没有生成视频")
+        self.video_controller.preview_video()
     
     def generate_clip(self, item: ImageItem):
         """生成单个片段"""
@@ -328,51 +310,46 @@ class MainWindow(QMainWindow):
             row = self.image_items.index(item) + 1
             animation_widget = self.content_layout.itemAtPosition(row, 4).widget()
             
-            # 随机选择缩放和平移预设
+            # 获取控件
             scale_combo = animation_widget.findChild(QComboBox, "scale_combo")
             position_combo = animation_widget.findChild(QComboBox, "position_combo")
+            curve_combo = animation_widget.findChild(QComboBox, "curve_combo")
             
             # 设置为随机
             scale_combo.setCurrentText("随机")
             position_combo.setCurrentText("随机")
             
-            # 更新动画设置
-            curve_combo = animation_widget.findChild(QComboBox, "curve_combo")
-            animation_settings = self.video_service.animation_service.combine_animation_settings(
-                "随机", "随机", curve_combo.currentText()
+            # 创建动画设置
+            self.video_controller.create_animation_for_item(
+                item, 
+                scale_combo.currentText(),
+                position_combo.currentText(),
+                curve_combo.currentText()
             )
-            item.animation = animation_settings
         
-        # 获取当前行以便访问动画控件
-        row = self.image_items.index(item) + 1
-        animation_widget = self.content_layout.itemAtPosition(row, 4).widget()
-        
-        # 获取预览需要的所有控件
-        scale_combo = animation_widget.findChild(QComboBox, "scale_combo")
-        position_combo = animation_widget.findChild(QComboBox, "position_combo")
-        curve_combo = animation_widget.findChild(QComboBox, "curve_combo")
-        
-        # 更新动画设置 - 组合缩放、平移和曲线
-        scale_preset = scale_combo.currentText()
-        position_preset = position_combo.currentText()
-        curve_name = curve_combo.currentText()
-        
-        # 组合设置
-        animation_settings = self.video_service.animation_service.combine_animation_settings(
-            scale_preset, position_preset, curve_name
-        )
-        
-        # 应用到item
-        item.animation = animation_settings
-        
-        # 生成预览文件
-        output_path = self.video_service.preview_clip(
-            item.to_dict(),
-            f"preview_{item.id}.mp4"
-        )
-        
-        # 预览视频
-        self.video_service.open_with_default_player(output_path)
+        try:
+            # 状态栏显示处理中消息
+            self.statusBar().showMessage("正在生成片段预览...")
+            
+            # 临时禁用UI
+            self.disable_ui_during_processing(True)
+            
+            # 生成预览文件
+            output_path = self.video_controller.generate_clip(item)
+            
+            # 更新状态栏
+            self.statusBar().showMessage(f"片段预览已生成：{output_path}")
+            
+            # 预览视频
+            self.video_controller.preview_video(output_path)
+            
+        except Exception as e:
+            # 显示错误消息
+            self.statusBar().showMessage(f"生成片段失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"生成片段失败: {str(e)}")
+        finally:
+            # 恢复UI状态
+            self.disable_ui_during_processing(False)
 
     def create_animation_settings(self, item: ImageItem) -> QWidget:
         """
@@ -489,13 +466,10 @@ class MainWindow(QMainWindow):
             position_preset = position_combo.currentText()
             curve_name = curve_combo.currentText()
             
-            # 组合设置
-            animation_settings = self.video_service.animation_service.combine_animation_settings(
-                scale_preset, position_preset, curve_name
+            # 使用控制器创建动画设置
+            self.video_controller.create_animation_for_item(
+                item, scale_preset, position_preset, curve_name
             )
-            
-            # 应用到item
-            item.animation = animation_settings
         
         # 连接信号
         scale_combo.currentTextChanged.connect(update_animation)
@@ -527,30 +501,22 @@ class MainWindow(QMainWindow):
             position_combo = animation_widget.findChild(QComboBox, "position_combo")
             curve_combo = animation_widget.findChild(QComboBox, "curve_combo")
             
-            # 更新动画设置 - 组合缩放、平移和曲线
-            scale_preset = scale_combo.currentText()
-            position_preset = position_combo.currentText()
-            curve_name = curve_combo.currentText()
-            
-            # 组合设置
-            animation_settings = self.video_service.animation_service.combine_animation_settings(
-                scale_preset, position_preset, curve_name
+            # 更新动画设置 - 使用控制器
+            self.video_controller.create_animation_for_item(
+                item, 
+                scale_combo.currentText(),
+                position_combo.currentText(),
+                curve_combo.currentText()
             )
-            
-            # 应用到item
-            item.animation = animation_settings
             
             # 生成预览视频
-            output_path = self.video_service.preview_clip(
-                item.to_dict(),
-                f"preview_{item.id}.mp4"
-            )
+            output_path = self.video_controller.generate_clip(item)
             
             # 更新状态栏
             self.statusBar().showMessage(f"预览片段已生成：{output_path}")
             
             # 播放预览视频
-            self.video_service.open_with_default_player(output_path)
+            self.video_controller.preview_video(output_path)
             
         except Exception as e:
             # 仅在出错时显示对话框
