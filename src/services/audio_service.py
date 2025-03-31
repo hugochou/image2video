@@ -5,13 +5,11 @@ from gtts import gTTS
 import subprocess
 import platform
 import os.path
+from .path_service import PathService
 
 class AudioService:
     def __init__(self):
-        self.output_dir = Path("output")
-        self.audio_dir = self.output_dir / "audio"
-        self.output_dir.mkdir(exist_ok=True)
-        self.audio_dir.mkdir(exist_ok=True)
+        self.path_service = PathService()
     
     def generate_speech(self, text: str, filename: str, image_name: str = None) -> Optional[Path]:
         """
@@ -26,8 +24,9 @@ class AudioService:
             成功返回音频文件路径，失败返回 None
         """
         try:
-            # 确保输出目录存在
-            self.audio_dir.mkdir(parents=True, exist_ok=True)
+            # 获取音频目录
+            audio_dir = self.path_service.audio_directory
+            audio_dir.mkdir(parents=True, exist_ok=True)
             
             # 如果提供了图片名称，使用它作为音频文件名
             if image_name:
@@ -38,7 +37,7 @@ class AudioService:
                 output_filename = filename
             
             # 构建完整的输出路径
-            output_path = self.audio_dir / output_filename
+            output_path = audio_dir / output_filename
             
             # 使用 gTTS 生成语音
             tts = gTTS(text=text, lang='zh-cn')

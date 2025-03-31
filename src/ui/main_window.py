@@ -329,16 +329,25 @@ class MainWindow(QMainWindow):
         
         try:
             # 状态栏显示处理中消息
-            self.statusBar().showMessage("正在生成片段预览...")
+            self.statusBar().showMessage("正在检查并生成片段预览...")
             
             # 临时禁用UI
             self.disable_ui_during_processing(True)
             
-            # 生成预览文件
+            # 检查是否已生成该片段
+            if self.video_controller.is_clip_generated(item):
+                # 如果已生成，显示使用已有片段的消息
+                clip_path = self.video_controller.generated_clips[str(item.image_path)]
+                self.statusBar().showMessage(f"使用已生成的片段：{clip_path}")
+            else:
+                # 如果未生成，则生成新片段
+                self.statusBar().showMessage("正在生成新片段...")
+            
+            # 生成或重用预览文件
             output_path = self.video_controller.generate_clip(item)
             
             # 更新状态栏
-            self.statusBar().showMessage(f"片段预览已生成：{output_path}")
+            self.statusBar().showMessage(f"片段预览已就绪：{output_path}")
             
             # 预览视频
             self.video_controller.preview_video(output_path)
@@ -488,7 +497,7 @@ class MainWindow(QMainWindow):
             row = self.image_items.index(item) + 1
             
             # 状态栏显示处理中消息
-            self.statusBar().showMessage("正在生成预览片段...")
+            self.statusBar().showMessage("正在准备预览动画效果...")
             
             # 临时禁用UI
             self.disable_ui_during_processing(True)
@@ -501,30 +510,26 @@ class MainWindow(QMainWindow):
             position_combo = animation_widget.findChild(QComboBox, "position_combo")
             curve_combo = animation_widget.findChild(QComboBox, "curve_combo")
             
-            # 更新动画设置 - 使用控制器
+            # 应用动画设置
             self.video_controller.create_animation_for_item(
-                item, 
+                item,
                 scale_combo.currentText(),
                 position_combo.currentText(),
                 curve_combo.currentText()
             )
             
-            # 生成预览视频
-            output_path = self.video_controller.generate_clip(item)
-            
-            # 更新状态栏
-            self.statusBar().showMessage(f"预览片段已生成：{output_path}")
-            
-            # 播放预览视频
-            self.video_controller.preview_video(output_path)
-            
+            # 使用video_controller的preview_clip方法进行预览
+            if self.video_controller.preview_clip(item):
+                self.statusBar().showMessage("正在播放动画预览...")
+            else:
+                self.statusBar().showMessage("预览失败，请检查日志")
+                
         except Exception as e:
-            # 仅在出错时显示对话框
-            QMessageBox.critical(self, "错误", f"预览失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            # 显示错误消息
+            self.statusBar().showMessage(f"预览动画失败: {str(e)}")
+            QMessageBox.critical(self, "错误", f"预览动画失败: {str(e)}")
         finally:
-            # 恢复UI
+            # 恢复UI状态
             self.disable_ui_during_processing(False)
 
 class VideoSettingsDialog(QDialog):

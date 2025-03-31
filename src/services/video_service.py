@@ -24,17 +24,13 @@ except AttributeError:
 from ..models.image_item import ImageItem
 from .animation_service import AnimationService
 from .transition_service import TransitionService
+from .path_service import PathService
 
 class VideoService:
     """视频服务，处理视频的生成和编辑"""
     
     def __init__(self):
-        self.output_dir = Path("output")
-        self.video_dir = self.output_dir / "video"
-        self.preview_dir = self.video_dir / "previews"  # 单段视频预览目录
-        self.output_dir.mkdir(exist_ok=True)
-        self.video_dir.mkdir(exist_ok=True)
-        self.preview_dir.mkdir(exist_ok=True)
+        self.path_service = PathService()
         self.default_duration = 5  # 默认每个片段的持续时间
         self.default_fps = 30      # 默认帧率
         
@@ -465,9 +461,10 @@ class VideoService:
             # 创建片段
             clip = self.create_clip(preview_item)
             
-            # 确保输出目录存在
-            self.preview_dir.mkdir(parents=True, exist_ok=True)
-            output_path = self.preview_dir / output_filename
+            # 获取视频目录
+            video_dir = self.path_service.video_directory
+            video_dir.mkdir(parents=True, exist_ok=True)
+            output_path = video_dir / output_filename
             
             # 写入预览文件
             clip.write_videofile(
