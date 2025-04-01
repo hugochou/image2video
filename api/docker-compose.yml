@@ -1,0 +1,17 @@
+version: '3'
+
+services:
+  image2video-api:
+    build:
+      context: ..
+      dockerfile: api/Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./api_uploads:/app/api/api_uploads
+      - ./api_output:/app/api/api_output
+      - ./api_temp:/app/api/api_temp
+      - ./logs:/app/api/logs
+    restart: always
+    environment:
+      - PYTHONUNBUFFERED=1 
